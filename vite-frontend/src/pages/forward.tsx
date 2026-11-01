@@ -42,9 +42,17 @@ import {
   pauseForwardService,
   resumeForwardService,
   diagnoseForward,
-  updateForwardOrder
+  updateForwardOrder,
+  getForwardRules
 } from "@/api";
 import { JwtUtil } from "@/utils/jwt";
+
+interface ForwardRuleItem {
+  matchType?: string;
+  matchValue: string;
+  targetAddr: string;
+  remark?: string;
+}
 
 interface Forward {
   id: number;
@@ -56,6 +64,12 @@ interface Forward {
   remoteAddr: string;
   interfaceName?: string;
   strategy: string;
+  /** 0-普通转发 1-端口复用 */
+  mode?: number;
+  /** 端口复用兜底目标 */
+  fallbackAddr?: string;
+  /** 端口复用分流规则 */
+  rules?: ForwardRuleItem[];
   status: number;
   inFlow: number;
   outFlow: number;
@@ -82,6 +96,12 @@ interface ForwardForm {
   remoteAddr: string;
   interfaceName?: string;
   strategy: string;
+  /** 0-普通转发 1-端口复用 */
+  mode?: number;
+  /** 端口复用兜底目标 */
+  fallbackAddr?: string;
+  /** 端口复用分流规则 */
+  rules?: ForwardRuleItem[];
 }
 
 interface AddressItem {
@@ -191,7 +211,10 @@ export default function ForwardPage() {
     inPort: null,
     remoteAddr: '',
     interfaceName: '',
-    strategy: 'fifo'
+    strategy: 'fifo',
+    mode: 0,
+    fallbackAddr: '',
+    rules: []
   });
   
   // 表单验证错误
@@ -403,7 +426,25 @@ export default function ForwardPage() {
       newErrors.tunnelId = '请选择关联隧道';
     }
     
-    if (!form.remoteAddr.trim()) {
+    if ((form.mode ?? 0) === 1) {
+      // 端口复用模式：校验分流规则
+      const rules = form.rules || [];
+      if (rules.length === 0) {
+        newErrors.rules = '端口复用至少需要一条分流规则';
+      } else {
+        for (let i = 0; i < rules.length; i++) {
+          const r = rules[i];
+          if (!r.matchValue.trim()) {
+            newErrors.rules = `第${i + 1}条规则的域名不能为空`;
+            break;
+          }
+          if (!r.targetAddr.trim() || !r.targetAddr.includes(':')) {
+            newErrors.rules = `第${i + 1}条规则的目标地址需为 IP:端口`;
+            break;
+          }
+        }
+      }
+    } else if (!form.remoteAddr.trim()) {
       newErrors.remoteAddr = '请输入远程地址';
     } else {
       // 验证地址格式
@@ -444,7 +485,10 @@ export default function ForwardPage() {
       inPort: null,
       remoteAddr: '',
       interfaceName: '',
-      strategy: 'fifo'
+      strategy: 'fifo',
+      mode: 0,
+      fallbackAddr: '',
+      rules: []
     });
     setSelectedTunnel(null);
     setErrors({});
@@ -460,14 +504,36 @@ export default function ForwardPage() {
       name: forward.name,
       tunnelId: forward.tunnelId,
       inPort: forward.inPort,
-      remoteAddr: forward.remoteAddr.split(',').join('\n'),
+      remoteAddr: (forward.remoteAddr || '').split(',').join('\n'),
       interfaceName: forward.interfaceName || '',
-      strategy: forward.strategy || 'fifo'
+      strategy: forward.strategy || 'fifo',
+      mode: forward.mode ?? 0,
+      fallbackAddr: forward.fallbackAddr || '',
+      rules: forward.rules || []
     });
     const tunnel = tunnels.find(t => t.id === forward.tunnelId);
     setSelectedTunnel(tunnel || null);
     setErrors({});
     setModalOpen(true);
+
+    // 端口复用模式：异步补齐分流规则
+    if ((forward.mode ?? 0) === 1) {
+      getForwardRules(forward.id)
+        .then((res: any) => {
+          if (res.code === 0 && Array.isArray(res.data)) {
+            setForm(prev => ({
+              ...prev,
+              rules: res.data.map((r: any) => ({
+                matchType: r.matchType || 'sni',
+                matchValue: r.matchValue || '',
+                targetAddr: r.targetAddr || '',
+                remark: r.remark || ''
+              }))
+            }));
+          }
+        })
+        .catch(() => undefined);
+    }
   };
 
   // 显示删除确认
@@ -541,7 +607,10 @@ export default function ForwardPage() {
           inPort: form.inPort,
           remoteAddr: processedRemoteAddr,
           interfaceName: form.interfaceName,
-          strategy: addressCount > 1 ? form.strategy : 'fifo'
+          strategy: addressCount > 1 ? form.strategy : 'fifo',
+          mode: form.mode ?? 0,
+          fallbackAddr: form.fallbackAddr || '',
+          rules: form.rules || []
         };
         res = await updateForward(updateData);
       } else {
@@ -552,7 +621,10 @@ export default function ForwardPage() {
           inPort: form.inPort,
           remoteAddr: processedRemoteAddr,
           interfaceName: form.interfaceName,
-          strategy: addressCount > 1 ? form.strategy : 'fifo'
+          strategy: addressCount > 1 ? form.strategy : 'fifo',
+          mode: form.mode ?? 0,
+          fallbackAddr: form.fallbackAddr || '',
+          rules: form.rules || []
         };
         res = await createForward(createData);
       }
@@ -952,7 +1024,10 @@ export default function ForwardPage() {
             tunnelId: selectedTunnelForImport, // 使用用户选择的隧道
             inPort: portNumber, // 使用指定端口或自动分配
             remoteAddr: remoteAddr.trim(),
-            strategy: 'fifo'
+            strategy: 'fifo',
+            mode: 0,
+            fallbackAddr: '',
+            rules: []
           });
 
           if (response.code === 0) {
@@ -1615,9 +1690,94 @@ export default function ForwardPage() {
                       }
                     />
                     
+                    <Switch
+                      isSelected={(form.mode ?? 0) === 1}
+                      onValueChange={(checked) => setForm(prev => ({
+                        ...prev,
+                        mode: checked ? 1 : 0,
+                        rules: checked && (!prev.rules || prev.rules.length === 0)
+                          ? [{ matchType: 'sni', matchValue: '', targetAddr: '', remark: '' }]
+                          : prev.rules
+                      }))}
+                      size="sm"
+                    >
+                      端口复用（单端口按域名分流到多个目标）
+                    </Switch>
+
+                    {(form.mode ?? 0) === 1 && (
+                      <div className="rounded-lg border border-default-200 p-3 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-small text-default-600">分流规则</span>
+                          <Button size="sm" variant="flat" onPress={() => setForm(prev => ({
+                            ...prev,
+                            rules: [...(prev.rules || []), { matchType: 'sni', matchValue: '', targetAddr: '', remark: '' }]
+                          }))}>新增规则</Button>
+                        </div>
+                        {(form.rules || []).map((rule, idx) => (
+                          <div key={idx} className="grid grid-cols-12 gap-2 items-end">
+                            <Input
+                              className="col-span-4"
+                              size="sm"
+                              label="域名"
+                              placeholder="a.example.com 或 *.example.com"
+                              value={rule.matchValue}
+                              onChange={(e) => setForm(prev => {
+                                const rules = [...(prev.rules || [])];
+                                rules[idx] = { ...rules[idx], matchValue: e.target.value };
+                                return { ...prev, rules };
+                              })}
+                            />
+                            <Input
+                              className="col-span-4"
+                              size="sm"
+                              label="目标地址"
+                              placeholder="10.0.0.5:443"
+                              value={rule.targetAddr}
+                              onChange={(e) => setForm(prev => {
+                                const rules = [...(prev.rules || [])];
+                                rules[idx] = { ...rules[idx], targetAddr: e.target.value };
+                                return { ...prev, rules };
+                              })}
+                            />
+                            <Input
+                              className="col-span-3"
+                              size="sm"
+                              label="备注"
+                              placeholder="可选"
+                              value={rule.remark || ''}
+                              onChange={(e) => setForm(prev => {
+                                const rules = [...(prev.rules || [])];
+                                rules[idx] = { ...rules[idx], remark: e.target.value };
+                                return { ...prev, rules };
+                              })}
+                            />
+                            <Button
+                              className="col-span-1"
+                              isIconOnly
+                              size="sm"
+                              color="danger"
+                              variant="flat"
+                              onPress={() => setForm(prev => ({ ...prev, rules: (prev.rules || []).filter((_, i) => i !== idx) }))}
+                            >
+                              删
+                            </Button>
+                          </div>
+                        ))}
+                        <Input
+                          size="sm"
+                          label="兜底目标（可选）"
+                          placeholder="无 SNI/Host 线索时转发到这里，如 10.0.0.5:443"
+                          value={form.fallbackAddr || ''}
+                          onChange={(e) => setForm(prev => ({ ...prev, fallbackAddr: e.target.value }))}
+                        />
+                        {errors.rules && <span className="text-tiny text-danger">{errors.rules}</span>}
+                      </div>
+                    )}
+
                     <Textarea
                       label="远程地址"
                       placeholder="请输入远程地址，多个地址用换行分隔&#10;例如:&#10;192.168.1.100:8080&#10;example.com:3000"
+                      isDisabled={(form.mode ?? 0) === 1}
                       value={form.remoteAddr}
                       onChange={(e) => setForm(prev => ({ ...prev, remoteAddr: e.target.value }))}
                       isInvalid={!!errors.remoteAddr}

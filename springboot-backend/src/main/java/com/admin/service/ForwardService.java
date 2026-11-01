@@ -31,6 +31,11 @@ public interface ForwardService extends IService<Forward> {
     R getAllForwards();
 
     /**
+     * 查询某个转发的端口复用分流规则
+     */
+    R getForwardRules(Long forwardId);
+
+    /**
      * 更新端口转发
      * @param forwardUpdateDto 更新数据
      * @return 结果

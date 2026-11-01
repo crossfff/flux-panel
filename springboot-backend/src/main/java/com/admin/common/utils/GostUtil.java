@@ -394,4 +394,73 @@ public class GostUtil {
         return fow_type != null && fow_type != 1;
     }
 
+
+    /**
+     * 新增端口复用入口服务（demux）
+     * 单个入口端口按 TLS SNI / HTTP Host 分流到多个目标，无需为每个目标单独开端口
+     *
+     * @param rules    域名 -> "ip:port" 的映射（key 需小写，支持 *.example.com 通配）
+     * @param fallback 无 SNI/Host 线索时的兜底目标
+     */
+    public static GostDto AddDemuxService(Long node_id, String name, Integer in_port, Integer limiter,
+                                          JSONObject rules, String fallback, Integer fow_type,
+                                          Tunnel tunnel, String strategy, String interfaceName) {
+        JSONObject service = new JSONObject();
+        service.put("name", name + "_tcp");
+        service.put("addr", tunnel.getTcpListenAddr() + ":" + in_port);
+
+        if (StringUtils.isNotBlank(interfaceName)) {
+            JSONObject metadata = new JSONObject();
+            metadata.put("interface", interfaceName);
+            service.put("metadata", metadata);
+        }
+
+        if (limiter != null) {
+            service.put("limiter", limiter.toString());
+        }
+
+        JSONObject handler = new JSONObject();
+        handler.put("type", "demux");
+        if (isTunnelForwarding(fow_type)) {
+            handler.put("chain", name + "_chains");
+        }
+        JSONObject handlerMeta = new JSONObject();
+        handlerMeta.put("rules", rules);
+        if (StringUtils.isNotBlank(fallback)) {
+            handlerMeta.put("fallback", fallback);
+        }
+        handler.put("metadata", handlerMeta);
+        service.put("handler", handler);
+
+        JSONObject listener = new JSONObject();
+        listener.put("type", "tcp");
+        service.put("listener", listener);
+
+        JSONArray services = new JSONArray();
+        services.add(service);
+        return WebSocketServer.send_msg(node_id, services, "AddService");
+    }
+
+    /**
+     * 新增端口复用出口服务（relay）
+     * 与普通转发不同：不带 forwarder，因此可接受入口端 dumper 传来的任意目标地址
+     */
+    public static GostDto AddDemuxExitService(Long node_id, String name, Integer out_port, String protocol) {
+        JSONObject service = new JSONObject();
+        service.put("name", name + "_tls");
+        service.put("addr", ":" + out_port);
+
+        JSONObject handler = new JSONObject();
+        handler.put("type", "relay");
+        service.put("handler", handler);
+
+        JSONObject listener = new JSONObject();
+        listener.put("type", protocol);
+        service.put("listener", listener);
+
+        JSONArray services = new JSONArray();
+        services.add(service);
+        return WebSocketServer.send_msg(node_id, services, "AddService");
+    }
+
 }

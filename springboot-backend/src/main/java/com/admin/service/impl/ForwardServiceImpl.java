@@ -10,6 +10,9 @@ import com.admin.common.utils.JwtUtil;
 import com.admin.common.utils.WebSocketServer;
 import com.admin.entity.*;
 import com.admin.mapper.ForwardMapper;
+import com.admin.mapper.ForwardRuleMapper;
+import com.admin.common.dto.ForwardRuleDto;
+import org.apache.commons.lang3.StringUtils;
 import com.admin.service.*;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -63,6 +66,9 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
     @Resource
     NodeService nodeService;
 
+    @Resource
+    ForwardRuleMapper forwardRuleMapper;
+
 
     @Override
     public R createForward(ForwardDto forwardDto) {
@@ -90,15 +96,35 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
             return R.err(portAllocation.getErrorMessage());
         }
 
+        // 4.5 端口复用模式校验
+        Integer mode = forwardDto.getMode() == null ? 0 : forwardDto.getMode();
+        if (mode == 1) {
+            if (tunnel.getType() != TUNNEL_TYPE_TUNNEL_FORWARD) {
+                return R.err("端口复用仅支持隧道转发类型的隧道");
+            }
+            String ruleError = checkDemuxRules(forwardDto.getRules());
+            if (ruleError != null) {
+                return R.err(ruleError);
+            }
+        } else if (StringUtils.isBlank(forwardDto.getRemoteAddr())) {
+            return R.err("远程地址不能为空");
+        }
+
         // 5. 创建并保存Forward对象
         Forward forward = createForwardEntity(forwardDto, currentUser, portAllocation);
         if (!this.save(forward)) {
             return R.err("端口转发创建失败");
         }
 
+        // 5.5 端口复用：保存分流规则
+        if (mode == 1) {
+            saveRules(forward.getId(), forwardDto.getRules());
+        }
+
         // 6. 获取所需的节点信息
         NodeInfo nodeInfo = getRequiredNodes(tunnel);
         if (nodeInfo.isHasError()) {
+            deleteRules(forward.getId());
             this.removeById(forward.getId());
             return R.err(nodeInfo.getErrorMessage());
         }
@@ -107,6 +133,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         R gostResult = createGostServices(forward, tunnel, permissionResult.getLimiter(), nodeInfo, permissionResult.getUserTunnel());
 
         if (gostResult.getCode() != 0) {
+            deleteRules(forward.getId());
             this.removeById(forward.getId());
             return gostResult;
         }
@@ -126,6 +153,21 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         }
 
         return R.ok(forwardList);
+    }
+
+    @Override
+    public R getForwardRules(Long forwardId) {
+        UserInfo currentUser = getCurrentUserInfo();
+        Forward forward = validateForwardExists(forwardId, currentUser);
+        if (forward == null) {
+            return R.err("端口转发不存在");
+        }
+        List<ForwardRule> rules = forwardRuleMapper.selectList(
+                new QueryWrapper<ForwardRule>()
+                        .eq("forward_id", forwardId.intValue())
+                        .eq("status", 0)
+                        .orderByAsc("id"));
+        return R.ok(rules);
     }
 
     @Override
@@ -217,6 +259,17 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         // 6. 更新Forward对象
         Forward updatedForward = updateForwardEntity(forwardUpdateDto, existForward, tunnel);
 
+        // 6.5 端口复用规则同步
+        if (isDemuxMode(updatedForward)) {
+            String ruleError = checkDemuxRules(forwardUpdateDto.getRules());
+            if (ruleError != null) {
+                return R.err(ruleError);
+            }
+            replaceRules(updatedForward.getId(), forwardUpdateDto.getRules());
+        } else {
+            deleteRules(updatedForward.getId());
+        }
+
         // 7. 获取所需的节点信息
         NodeInfo nodeInfo = getRequiredNodes(tunnel);
         if (nodeInfo.isHasError()) {
@@ -284,6 +337,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         }
 
         // 7. 删除转发记录
+        deleteRules(id);
         boolean result = this.removeById(id);
         if (result) {
             return R.ok("端口转发删除成功");
@@ -314,6 +368,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         }
 
         // 3. 直接删除转发记录，跳过GOST服务删除
+        deleteRules(id);
         boolean result = this.removeById(id);
         if (result) {
             return R.ok("端口转发强制删除成功");
@@ -945,6 +1000,10 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
     private Forward updateForwardEntity(ForwardUpdateDto forwardUpdateDto, Forward existForward, Tunnel tunnel) {
         Forward forward = new Forward();
         BeanUtils.copyProperties(forwardUpdateDto, forward);
+        // 未显式传 mode 时沿用原模式，避免更新普通转发时把复用模式清掉
+        if (forward.getMode() == null) {
+            forward.setMode(existForward.getMode() == null ? 0 : existForward.getMode());
+        }
 
         // 处理端口分配逻辑
         boolean tunnelChanged = !existForward.getTunnelId().equals(forwardUpdateDto.getTunnelId());
@@ -980,6 +1039,30 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
      */
     private R createGostServices(Forward forward, Tunnel tunnel, Integer limiter, NodeInfo nodeInfo, UserTunnel userTunnel) {
         String serviceName = buildServiceName(forward.getId(), forward.getUserId(), userTunnel);
+
+        // 端口复用模式：链 + 出口 relay + 入口 demux
+        if (isDemuxMode(forward)) {
+            if (tunnel.getType() != TUNNEL_TYPE_TUNNEL_FORWARD) {
+                return R.err("端口复用仅支持隧道转发类型的隧道");
+            }
+            R demuxChainResult = createChainService(nodeInfo.getInNode(), serviceName, tunnel.getOutIp(), forward.getOutPort(), tunnel.getProtocol(), tunnel.getInterfaceName());
+            if (demuxChainResult.getCode() != 0) {
+                GostUtil.DeleteChains(nodeInfo.getInNode().getId(), serviceName);
+                return demuxChainResult;
+            }
+            R demuxExitResult = createDemuxExitService(nodeInfo.getOutNode(), serviceName, forward);
+            if (demuxExitResult.getCode() != 0) {
+                GostUtil.DeleteChains(nodeInfo.getInNode().getId(), serviceName);
+                return demuxExitResult;
+            }
+            R demuxMainResult = createDemuxMainService(nodeInfo.getInNode(), serviceName, forward, limiter, tunnel.getType(), tunnel, forward.getStrategy(), null);
+            if (demuxMainResult.getCode() != 0) {
+                GostUtil.DeleteChains(nodeInfo.getInNode().getId(), serviceName);
+                GostUtil.DeleteRemoteService(nodeInfo.getOutNode().getId(), serviceName);
+                return demuxMainResult;
+            }
+            return R.ok();
+        }
 
         // 隧道转发需要创建链和远程服务
         if (tunnel.getType() == TUNNEL_TYPE_TUNNEL_FORWARD) {
@@ -1020,6 +1103,16 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
      */
     private R updateGostServices(Forward forward, Tunnel tunnel, Integer limiter, NodeInfo nodeInfo, UserTunnel userTunnel) {
         String serviceName = buildServiceName(forward.getId(), forward.getUserId(), userTunnel);
+
+        // 端口复用：规则可能整组变化，直接重建最稳妥
+        if (isDemuxMode(forward)) {
+            R delResult = deleteGostServices(forward, tunnel, nodeInfo, userTunnel);
+            if (delResult.getCode() != 0) {
+                updateForwardStatusToError(forward);
+                return delResult;
+            }
+            return createGostServices(forward, tunnel, limiter, nodeInfo, userTunnel);
+        }
 
         // 隧道转发需要更新链和远程服务
         if (tunnel.getType() == TUNNEL_TYPE_TUNNEL_FORWARD) {
@@ -1508,4 +1601,122 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         private double packetLoss;
         private long timestamp;
     }
+
+    // ==================== 端口复用（demux）相关 ====================
+
+    /**
+     * 是否端口复用模式
+     */
+    private boolean isDemuxMode(Forward forward) {
+        return forward != null && forward.getMode() != null && forward.getMode() == 1;
+    }
+
+    /**
+     * 校验端口复用规则，返回错误信息；通过则返回 null
+     */
+    private String checkDemuxRules(List<ForwardRuleDto> rules) {
+        if (rules == null || rules.isEmpty()) {
+            return "端口复用至少需要一条分流规则";
+        }
+        Set<String> seen = new HashSet<>();
+        for (ForwardRuleDto rule : rules) {
+            String matchValue = rule.getMatchValue() == null ? "" : rule.getMatchValue().trim().toLowerCase();
+            String targetAddr = rule.getTargetAddr() == null ? "" : rule.getTargetAddr().trim();
+            if (matchValue.isEmpty()) {
+                return "分流规则的域名不能为空";
+            }
+            if (targetAddr.isEmpty()) {
+                return "分流规则的目标地址不能为空";
+            }
+            if (!targetAddr.contains(":")) {
+                return "目标地址必须带端口，例如 10.0.0.5:8080";
+            }
+            if (!seen.add(matchValue)) {
+                return "分流规则重复：" + matchValue;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 保存分流规则
+     */
+    private void saveRules(Long forwardId, List<ForwardRuleDto> rules) {
+        if (forwardId == null || rules == null) {
+            return;
+        }
+        for (ForwardRuleDto dto : rules) {
+            ForwardRule rule = new ForwardRule();
+            rule.setForwardId(forwardId.intValue());
+            rule.setMatchType(StringUtils.isBlank(dto.getMatchType()) ? "sni" : dto.getMatchType().trim().toLowerCase());
+            rule.setMatchValue(dto.getMatchValue().trim().toLowerCase());
+            rule.setTargetAddr(dto.getTargetAddr().trim());
+            rule.setRemark(dto.getRemark());
+            rule.setStatus(0);
+            rule.setCreatedTime(System.currentTimeMillis());
+            rule.setUpdatedTime(System.currentTimeMillis());
+            forwardRuleMapper.insert(rule);
+        }
+    }
+
+    /**
+     * 覆盖式替换分流规则
+     */
+    private void replaceRules(Long forwardId, List<ForwardRuleDto> rules) {
+        deleteRules(forwardId);
+        saveRules(forwardId, rules);
+    }
+
+    /**
+     * 删除某个转发的全部规则
+     */
+    private void deleteRules(Long forwardId) {
+        if (forwardId == null) {
+            return;
+        }
+        forwardRuleMapper.delete(new QueryWrapper<ForwardRule>().eq("forward_id", forwardId.intValue()));
+    }
+
+    /**
+     * 构造 域名 -> 目标地址 的映射（键统一小写，与 gost demux 的查表逻辑一致）
+     */
+    private JSONObject loadRulesMap(Integer forwardId) {
+        JSONObject map = new JSONObject();
+        if (forwardId == null) {
+            return map;
+        }
+        List<ForwardRule> rules = forwardRuleMapper.selectList(
+                new QueryWrapper<ForwardRule>()
+                        .eq("forward_id", forwardId)
+                        .eq("status", 0));
+        for (ForwardRule rule : rules) {
+            if (rule.getMatchValue() != null && rule.getTargetAddr() != null) {
+                map.put(rule.getMatchValue().trim().toLowerCase(), rule.getTargetAddr().trim());
+            }
+        }
+        return map;
+    }
+
+    /**
+     * 创建端口复用出口服务（relay，不带固定 forwarder）
+     */
+    private R createDemuxExitService(Node outNode, String serviceName, Forward forward) {
+        GostDto result = GostUtil.AddDemuxExitService(outNode.getId(), serviceName, forward.getOutPort(), "tcp");
+        return isGostOperationSuccess(result) ? R.ok() : R.err(result.getMsg());
+    }
+
+    /**
+     * 创建端口复用入口服务（demux，单端口按 SNI/Host 分流）
+     */
+    private R createDemuxMainService(Node inNode, String serviceName, Forward forward, Integer limiter,
+                                     Integer tunnelType, Tunnel tunnel, String strategy, String interfaceName) {
+        JSONObject rules = loadRulesMap(forward.getId() == null ? null : forward.getId().intValue());
+        if (rules.isEmpty()) {
+            return R.err("分流规则为空，无法创建端口复用服务");
+        }
+        GostDto result = GostUtil.AddDemuxService(inNode.getId(), serviceName, forward.getInPort(), limiter,
+                rules, forward.getFallbackAddr(), tunnelType, tunnel, strategy, interfaceName);
+        return isGostOperationSuccess(result) ? R.ok() : R.err(result.getMsg());
+    }
+
 }

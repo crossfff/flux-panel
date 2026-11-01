@@ -43,7 +43,9 @@ CREATE TABLE `forward` (
   `created_time` bigint(20) NOT NULL,
   `updated_time` bigint(20) NOT NULL,
   `status` int(10) NOT NULL,
-  `inx` int(10) NOT NULL DEFAULT '0'
+  `inx` int(10) NOT NULL DEFAULT '0',
+  `mode` int(10) NOT NULL DEFAULT 0,
+  `fallback_addr` varchar(255) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- --------------------------------------------------------
@@ -301,3 +303,26 @@ COMMIT;
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
 /*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
+
+-- --------------------------------------------------------
+
+--
+-- 表的结构 `forward_rule`（端口复用分流规则）
+--
+
+CREATE TABLE IF NOT EXISTS `forward_rule` (
+  `id` int(10) NOT NULL AUTO_INCREMENT,
+  `forward_id` int(10) NOT NULL,
+  `match_type` varchar(16) NOT NULL DEFAULT 'sni',
+  `match_value` varchar(255) NOT NULL,
+  `target_addr` varchar(255) NOT NULL,
+  `remark` varchar(255) DEFAULT NULL,
+  `in_flow` bigint(20) NOT NULL DEFAULT '0',
+  `out_flow` bigint(20) NOT NULL DEFAULT '0',
+  `created_time` bigint(20) NOT NULL,
+  `updated_time` bigint(20) NOT NULL,
+  `status` int(10) NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  KEY `idx_forward` (`forward_id`),
+  KEY `idx_match` (`match_value`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -17,7 +17,9 @@ public class ForwardDto {
     @NotNull(message = "隧道ID不能为空")
     private Integer tunnelId;
     
-    @NotBlank(message = "远程地址不能为空")
+    /**
+     * 远程地址（普通转发必填；端口复用模式下可为空，由 rules 决定目标）
+     */
     private String remoteAddr;
 
     private String strategy;
@@ -30,5 +32,21 @@ public class ForwardDto {
     private Integer inPort;
 
     private String interfaceName;
+
+
+    /**
+     * 转发模式：0-普通转发（默认），1-端口复用
+     */
+    private Integer mode;
+
+    /**
+     * 端口复用兜底目标 ip:port
+     */
+    private String fallbackAddr;
+
+    /**
+     * 端口复用规则列表（mode=1 时必填）
+     */
+    private java.util.List<ForwardRuleDto> rules;
 
 } 

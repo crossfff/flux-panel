@@ -42,4 +42,14 @@ public class Forward extends BaseEntity{
 
     private Integer inx;
 
+    /**
+     * 转发模式：0-普通转发（默认），1-端口复用（单入口端口按 SNI/Host 分流多目标）
+     */
+    private Integer mode;
+
+    /**
+     * 端口复用时的兜底目标（无 SNI/Host 线索时使用）
+     */
+    private String fallbackAddr;
+
 }

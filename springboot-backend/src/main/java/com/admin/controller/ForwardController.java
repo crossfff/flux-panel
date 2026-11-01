@@ -54,6 +54,13 @@ public class ForwardController extends BaseController {
     }
 
     @LogAnnotation
+    @PostMapping("/rules")
+    public R rules(@RequestBody Map<String, Object> params) {
+        Long id = Long.valueOf(params.get("id").toString());
+        return forwardService.getForwardRules(id);
+    }
+
+    @LogAnnotation
     @PostMapping("/force-delete")
     public R forceDelete(@RequestBody Map<String, Object> params) {
         Long id = Long.valueOf(params.get("id").toString());
