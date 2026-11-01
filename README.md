@@ -80,7 +80,34 @@
 ```
 ---
 ### Docker Compose部署
-#### 快速部署
+
+> ⚠️ 重要：下面的 `panel_install.sh` 默认拉取的是**上游 Docker Hub 镜像**（`brunuhville/*`），
+> 跑起来的是上游代码，你 fork 里的改动不会生效。
+> **要部署你自己的代码，请用下方的「从源码构建部署」。**
+
+#### 从源码构建部署（推荐，跑的是你自己的代码）
+
+```bash
+curl -L https://raw.githubusercontent.com/crossfff/flux-panel/refs/heads/main/deploy-source.sh -o deploy-source.sh \
+  && chmod +x deploy-source.sh && ./deploy-source.sh
+```
+
+脚本会：下载你仓库的源码 → 本地 `docker build` 前后端 → 起 MySQL/phpMyAdmin → 写 `.env`（随机密码与 JWT 密钥）。
+
+```bash
+# 全默认值一键装
+./deploy-source.sh --yes
+
+# 指定端口与目录、只看配置不启动
+./deploy-source.sh --dir /opt/flux-panel --frontend-port 8080 --backend-port 6365 --no-start
+
+# 更新代码后重建
+./deploy-source.sh --rebuild
+```
+
+> 构建需要至少 2G 内存（前端 vite 打包较吃内存），小内存机器请先加 swap。
+
+#### 使用上游镜像部署（仅体验原版）
 
 面板端：
 ```bash
