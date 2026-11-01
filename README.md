@@ -84,15 +84,46 @@
 
 面板端：
 ```bash
-curl -L https://raw.githubusercontent.com/BrunuhVille/flux-panel/refs/heads/main/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
+curl -L https://raw.githubusercontent.com/crossfff/flux-panel/refs/heads/main/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
 
 ```
 
 节点端：
 ```bash
-curl -L https://raw.githubusercontent.com/BrunuhVille/flux-panel/refs/heads/main/install.sh -o install.sh && chmod +x install.sh && ./install.sh
+curl -L https://raw.githubusercontent.com/crossfff/flux-panel/refs/heads/main/install.sh -o install.sh && chmod +x install.sh && ./install.sh
 
 ```
+
+#### 节点端进阶用法
+
+```bash
+# 同机多开：给另一个面板也干活（自动编号，互不影响）
+./install.sh --add -a 面板IP:端口 -s 节点密钥
+
+# 一个进程对接多个面板（多端对接，建议加 --prefix 隔离同名服务）
+./install.sh --link -a 第二个面板IP:端口 -s 第二个密钥 --prefix p2
+
+# 查看 / 卸载 / 更新
+./install.sh --list
+./install.sh --uninstall 2          # 卸载实例 2
+./install.sh --uninstall all        # 卸载全部
+./install.sh --update
+```
+
+详细说明见 [docs/install-node.md](docs/install-node.md)。
+
+#### 端口复用（一个入口端口转发多个目标）
+
+按 TLS SNI / HTTP Host 分流，一条隧道一个入口端口即可服务多个后端。
+详见 [docs/port-demux.md](docs/port-demux.md)。
+
+#### 数据库升级（旧面板数据原地迁移，不影响旧版运行）
+
+```bash
+./scripts/migrate-db.sh -h 127.0.0.1 -u root -p 密码 -d gost
+```
+
+脚本会自动全库备份、幂等升级、可回滚，旧版面板升级期间照常运行。
 
 
 

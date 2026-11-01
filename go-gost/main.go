@@ -115,14 +115,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("✅ 配置加载成功 - addr: %s", config.Addr)
+	endpoints := config.Endpoints()
+	fmt.Printf("✅ 配置加载成功 - 待对接面板 %d 个，主面板: %s\n", len(endpoints), endpoints[0].Addr)
 
 	log := xlogger.NewLogger()
 	logger.SetDefault(log)
 
-	wsReporter := socket.StartWebSocketReporterWithConfig(config.Addr, config.Secret, "1.2.0")
-	defer wsReporter.Stop()
-	service.SetHTTPReportURL(config.Addr, config.Secret)
+	// 多端对接：每个面板独立一条 WebSocket 长连接，互不影响
+	reporters := make([]*socket.WebSocketReporter, 0, len(endpoints))
+	for i, ep := range endpoints {
+		r := socket.StartWebSocketReporterWithConfigAndPrefix(ep.Addr, ep.Secret, "1.2.0", ep.Prefix)
+		reporters = append(reporters, r)
+		logger.Default().Infof("已对接面板 #%d -> %s (前缀: %q)", i+1, ep.Addr, ep.Prefix)
+	}
+	defer func() {
+		for _, r := range reporters {
+			r.Stop()
+		}
+	}()
+
+	// 流量统计上报仍走主面板
+	service.SetHTTPReportURL(endpoints[0].Addr, endpoints[0].Secret)
 
 	p := &program{}
 	if err := svc.Run(p); err != nil {

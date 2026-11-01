@@ -256,3 +256,6 @@ gitee/
 *.cert
 android-app/
 ios-app/
+
+# 数据库迁移备份
+db-backup/

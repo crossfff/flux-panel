@@ -94,6 +94,45 @@ type WebSocketReporter struct {
 	connecting     bool              // 新增：正在连接状态
 	connMutex      sync.Mutex        // 新增：连接状态锁
 	aesCrypto      *crypto.AESCrypto // 新增：AES加密器
+	prefix         string            // 多面板对接时的服务名前缀，避免同名冲突
+}
+
+// SetPrefix 设置该面板独占的名称前缀。
+// 多面板对接时，不同面板可能下发同名服务，加前缀可隔离。
+func (w *WebSocketReporter) SetPrefix(prefix string) {
+	p := strings.TrimSpace(prefix)
+	p = strings.Trim(p, "_")
+	p = strings.ReplaceAll(p, " ", "_")
+	w.prefix = p
+}
+
+// withPrefix 给单个名字加前缀
+func (w *WebSocketReporter) withPrefix(name string) string {
+	if w.prefix == "" || name == "" {
+		return name
+	}
+	return w.prefix + "_" + name
+}
+
+// applyPrefixToServices 给一批服务配置加前缀
+func (w *WebSocketReporter) applyPrefixToServices(svcs []config.ServiceConfig) {
+	if w.prefix == "" {
+		return
+	}
+	for i := range svcs {
+		svcs[i].Name = w.withPrefix(svcs[i].Name)
+	}
+}
+
+// applyPrefixToNames 给一批服务/链名称加前缀
+func (w *WebSocketReporter) applyPrefixToNames(names []string) []string {
+	if w.prefix == "" {
+		return names
+	}
+	for i := range names {
+		names[i] = w.withPrefix(names[i])
+	}
+	return names
 }
 
 // NewWebSocketReporter 创建一个新的WebSocket报告器
@@ -562,6 +601,7 @@ func (w *WebSocketReporter) handleAddService(data interface{}) error {
 		return fmt.Errorf("解析服务配置失败: %v", err)
 	}
 
+	w.applyPrefixToServices(services)
 	req := createServicesRequest{Data: services}
 	return createServices(req)
 }
@@ -583,6 +623,7 @@ func (w *WebSocketReporter) handleUpdateService(data interface{}) error {
 		return fmt.Errorf("解析服务配置失败: %v", err)
 	}
 
+	w.applyPrefixToServices(services)
 	req := updateServicesRequest{Data: services}
 	return updateServices(req)
 }
@@ -598,6 +639,7 @@ func (w *WebSocketReporter) handleDeleteService(data interface{}) error {
 		return fmt.Errorf("解析删除请求失败: %v", err)
 	}
 
+	w.applyPrefixToNames(req.Services)
 	return deleteServices(req)
 }
 
@@ -612,6 +654,7 @@ func (w *WebSocketReporter) handlePauseService(data interface{}) error {
 		return fmt.Errorf("解析暂停请求失败: %v", err)
 	}
 
+	w.applyPrefixToNames(req.Services)
 	return pauseServices(req)
 }
 
@@ -626,6 +669,7 @@ func (w *WebSocketReporter) handleResumeService(data interface{}) error {
 		return fmt.Errorf("解析恢复请求失败: %v", err)
 	}
 
+	w.applyPrefixToNames(req.Services)
 	return resumeServices(req)
 }
 
@@ -641,6 +685,7 @@ func (w *WebSocketReporter) handleAddChain(data interface{}) error {
 		return fmt.Errorf("解析链配置失败: %v", err)
 	}
 
+	chainConfig.Name = w.withPrefix(chainConfig.Name)
 	req := createChainRequest{Data: chainConfig}
 	return createChain(req)
 }
@@ -668,6 +713,8 @@ func (w *WebSocketReporter) handleUpdateChain(data interface{}) error {
 		updateReq.Data = chainConfig
 	}
 
+	updateReq.Chain = w.withPrefix(updateReq.Chain)
+	updateReq.Data.Name = w.withPrefix(updateReq.Data.Name)
 	req := updateChainRequest{
 		Chain: updateReq.Chain,
 		Data:  updateReq.Data,
@@ -694,6 +741,7 @@ func (w *WebSocketReporter) handleDeleteChain(data interface{}) error {
 		deleteReq.Chain = chainName
 	}
 
+	deleteReq.Chain = w.withPrefix(deleteReq.Chain)
 	return deleteChain(deleteReq)
 }
 
@@ -709,6 +757,7 @@ func (w *WebSocketReporter) handleAddLimiter(data interface{}) error {
 		return fmt.Errorf("解析限流器配置失败: %v", err)
 	}
 
+	limiterConfig.Name = w.withPrefix(limiterConfig.Name)
 	req := createLimiterRequest{Data: limiterConfig}
 	return createLimiter(req)
 }
@@ -736,6 +785,8 @@ func (w *WebSocketReporter) handleUpdateLimiter(data interface{}) error {
 		updateReq.Data = limiterConfig
 	}
 
+	updateReq.Limiter = w.withPrefix(updateReq.Limiter)
+	updateReq.Data.Name = w.withPrefix(updateReq.Data.Name)
 	req := updateLimiterRequest{
 		Limiter: updateReq.Limiter,
 		Data:    updateReq.Data,
@@ -929,6 +980,23 @@ func getMemoryInfo() MemoryInfo {
 	memInfo.Usage = vmStat.UsedPercent
 
 	return memInfo
+}
+
+// StartWebSocketReporterWithConfigAndPrefix 使用配置启动WebSocket报告器，并设置服务名前缀
+func StartWebSocketReporterWithConfigAndPrefix(Addr string, Secret string, Version string, Prefix string) *WebSocketReporter {
+	var fullURL string
+	if strings.HasPrefix(Addr, "ws://") || strings.HasPrefix(Addr, "wss://") {
+		fullURL = Addr + "/system-info?type=1&secret=" + Secret + "&version=" + Version
+	} else {
+		fullURL = "ws://" + Addr + "/system-info?type=1&secret=" + Secret + "&version=" + Version
+	}
+
+	fmt.Printf("🔗 WebSocket连接URL: %s\n", fullURL)
+
+	reporter := NewWebSocketReporter(fullURL, Secret)
+	reporter.SetPrefix(Prefix)
+	reporter.Start()
+	return reporter
 }
 
 // StartWebSocketReporterWithConfig 使用配置启动WebSocket报告器
